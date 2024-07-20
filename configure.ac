@@ -1348,6 +1348,13 @@ EOD
 	AC_DEFINE([BROKEN_SETVBUF], [1],
 	    [LynxOS has broken setvbuf() implementation])
 	;;
+*-*-gnu*)
+	dnl GNU Hurd.  Needs to be after the linux and the other *-gnu entries.
+	dnl Target SUSv3/POSIX.1-2001 plus BSD specifics.
+	dnl _DEFAULT_SOURCE is the new name for _BSD_SOURCE
+	dnl _GNU_SOURCE is needed for setres*id prototypes.
+	CPPFLAGS="$CPPFLAGS -D_XOPEN_SOURCE=600 -D_BSD_SOURCE -D_DEFAULT_SOURCE -D_GNU_SOURCE"
+	;;
 esac
 
 AC_MSG_CHECKING([compiler and flags for sanity])
@@ -1879,6 +1886,8 @@ AC_SUBST([PICFLAG])
 
 dnl    Checks for library functions. Please keep in alphabetical order
 AC_CHECK_FUNCS([ \
+	auth_hostok \
+	auth_timeok \
 	Blowfish_initstate \
 	Blowfish_expandstate \
 	Blowfish_expand0state \
@@ -2078,8 +2087,12 @@ AC_ARG_WITH([security-key-builtin],
 
 enable_dsa=
 AC_ARG_ENABLE([dsa-keys],
-	[  --disable-dsa-keys      disable DSA key support [no]],
-	[  enable_dsa="$enableval" ]
+	[  --enable-dsa-keys       enable DSA key support [no]],
+	[
+		if test "x$enableval" != "xno" ; then
+			enable_dsa=1
+		fi
+	]
 )
 
 AC_SEARCH_LIBS([dlopen], [dl])
@@ -3188,8 +3201,9 @@ if test "x$openssl" = "xyes" ; then
 			AC_MSG_RESULT([no])
 		]
 	)
+
 	openssl_dsa=no
-	if test -z "$enable_dsa" || test "x$enable_dsa" = "xyes"; then
+	if test ! -z "$enable_dsa" ; then
 		AC_CHECK_DECLS([OPENSSL_NO_DSA], [], [
 			AC_CHECK_DECLS([OPENSSL_IS_BORINGSSL], [],
 			    [ openssl_dsa=yes ],
@@ -3199,22 +3213,12 @@ if test "x$openssl" = "xyes" ; then
 		    [ #include <openssl/opensslconf.h> ]
 		)
 		AC_MSG_CHECKING([whether to enable DSA key support])
-		if test -z "$enable_dsa"; then
-			if test "x$openssl_dsa" = "xno"; then
-				AC_MSG_RESULT([not supported by OpenSSL])
-			else
-				AC_MSG_RESULT([yes])
-				AC_DEFINE([WITH_DSA], [1],
-				   [DSA keys enabled by default])
-			fi
+		if test "x$openssl_dsa" = "xno"; then
+			AC_MSG_ERROR([DSA requested but not supported by OpenSSL])
 		else
-			if test "x$openssl_dsa" = "xno"; then
-				AC_MSG_ERROR([DSA requested but not supported by OpenSSL])
-			else
-				AC_MSG_RESULT([yes])
-				AC_DEFINE([WITH_DSA], [1],
-				   [DSA keys explicitly enabled])
-			fi
+			AC_MSG_RESULT([yes])
+			AC_DEFINE([WITH_DSA], [1],
+			   [DSA keys explicitly enabled])
 		fi
 	fi
 fi

@@ -1,4 +1,4 @@
-/* $OpenBSD: servconf.h,v 1.163 2024/05/23 23:47:16 jsg Exp $ */
+/* $OpenBSD: servconf.h,v 1.165 2024/06/12 22:36:00 djm Exp $ */
 
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
@@ -63,6 +63,22 @@ struct queued_listenaddr {
 struct listenaddr {
 	char *rdomain;
 	struct addrinfo *addrs;
+};
+
+#define PER_SOURCE_PENALTY_OVERFLOW_DENY_ALL	1
+#define PER_SOURCE_PENALTY_OVERFLOW_PERMISSIVE	2
+struct per_source_penalty {
+	int	enabled;
+	int	max_sources4;
+	int	max_sources6;
+	int	overflow_mode;
+	int	overflow_mode6;
+	int	penalty_crash;
+	int	penalty_grace;
+	int	penalty_authfail;
+	int	penalty_noauth;
+	int	penalty_max;
+	int	penalty_min;
 };
 
 typedef struct {
@@ -172,6 +188,8 @@ typedef struct {
 	int	per_source_max_startups;
 	int	per_source_masklen_ipv4;
 	int	per_source_masklen_ipv6;
+	char	*per_source_penalty_exempt;
+	struct per_source_penalty per_source_penalty;
 	int	max_authtries;
 	int	max_sessions;
 	char   *banner;			/* SSH-2 banner message */
@@ -192,6 +210,7 @@ typedef struct {
 	char   *adm_forced_command;
 
 	int	use_pam;		/* Enable auth via PAM */
+	char   *pam_service_name;
 
 	int	permit_tun;
 
@@ -276,6 +295,7 @@ TAILQ_HEAD(include_list, include_item);
 		M_CP_STROPT(ca_sign_algorithms); \
 		M_CP_STROPT(routing_domain); \
 		M_CP_STROPT(permit_user_env_allowlist); \
+		M_CP_STROPT(pam_service_name); \
 		M_CP_STRARRAYOPT(authorized_keys_files, num_authkeys_files); \
 		M_CP_STRARRAYOPT(allow_users, num_allow_users); \
 		M_CP_STRARRAYOPT(deny_users, num_deny_users); \

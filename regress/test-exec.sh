@@ -1,4 +1,4 @@
-#	$OpenBSD: test-exec.sh,v 1.111 2024/05/17 01:45:22 djm Exp $
+#	$OpenBSD: test-exec.sh,v 1.119 2024/06/20 08:18:34 dtucker Exp $
 #	Placed in the Public Domain.
 
 #SUDO=sudo
@@ -456,33 +456,32 @@ make_tmpdir ()
 
 stop_sshd ()
 {
-	if [ -f $PIDFILE ]; then
-		pid=`$SUDO cat $PIDFILE`
-		if [ "X$pid" = "X" ]; then
-			echo no sshd running
-		else
-			if [ $pid -lt 2 ]; then
-				echo bad pid for sshd: $pid
-			else
-				$SUDO kill $pid
-				trace "wait for sshd to exit"
-				i=0;
-				while [ -f $PIDFILE -a $i -lt 5 ]; do
-					i=`expr $i + 1`
-					sleep $i
-				done
-				if test -f $PIDFILE; then
-					if $SUDO kill -0 $pid; then
-						echo "sshd didn't exit " \
-						    "port $PORT pid $pid"
-					else
-						echo "sshd died without cleanup"
-					fi
-					exit 1
-				fi
-			fi
-		fi
+	[ -z $PIDFILE ] && return
+	[ -f $PIDFILE ] || return
+	pid=`$SUDO cat $PIDFILE`
+	if [ "X$pid" = "X" ]; then
+		echo "no sshd running" 1>&2
+		return
+	elif [ $pid -lt 2 ]; then
+		echo "bad pid for sshd: $pid" 1>&2
+		return
 	fi
+	$SUDO kill $pid
+	trace "wait for sshd to exit"
+	i=0;
+	while [ -f $PIDFILE -a $i -lt 5 ]; do
+		i=`expr $i + 1`
+		sleep $i
+	done
+	if test -f $PIDFILE; then
+		if $SUDO kill -0 $pid; then
+			echo "sshd didn't exit port $PORT pid $pid" 1>&2
+		else
+			echo "sshd died without cleanup" 1>&2
+		fi
+		exit 1
+	fi
+	PIDFILE=""
 }
 
 # helper
@@ -622,6 +621,7 @@ cat << EOF > $OBJ/sshd_config
 	AcceptEnv		_XXX_TEST
 	Subsystem	sftp	$SFTPSERVER
 	SshdSessionPath		$SSHD_SESSION
+	PerSourcePenalties	no
 EOF
 
 # This may be necessary if /usr/src and/or /usr/obj are group-writable,
@@ -846,15 +846,25 @@ esac
 if test "$REGRESS_INTEROP_DROPBEAR" = "yes" ; then
 	trace Create dropbear keys and add to authorized_keys
 	mkdir -p $OBJ/.dropbear
-	for i in rsa ecdsa ed25519 dss; do
-		if [ ! -f "$OBJ/.dropbear/id_$i" ]; then
-			($DROPBEARKEY -t $i -f $OBJ/.dropbear/id_$i
-			$DROPBEARCONVERT dropbear openssh \
-			    $OBJ/.dropbear/id_$i $OBJ/.dropbear/ossh.id_$i
-			) > /dev/null 2>&1
+	kt="ed25519"
+	for i in dss rsa ecdsa; do
+		if $SSH -Q key-plain | grep "$i" >/dev/null; then
+			kt="$kt $i"
+		else
+			rm -f "$OBJ/.dropbear/id_$i"
 		fi
+	done
+	for i in $kt; do
+		if [ ! -f "$OBJ/.dropbear/id_$i" ]; then
+			verbose Create dropbear key type $i
+			$DROPBEARKEY -t $i -f $OBJ/.dropbear/id_$i \
+			    >/dev/null 2>&1
+		fi
+		$DROPBEARCONVERT dropbear openssh $OBJ/.dropbear/id_$i \
+		    $OBJ/.dropbear/ossh.id_$i >/dev/null 2>&1
 		$SSHKEYGEN -y -f $OBJ/.dropbear/ossh.id_$i \
 		   >>$OBJ/authorized_keys_$USER
+		rm -f $OBJ/.dropbear/id_$i.pub $OBJ/.dropbear/ossh.id_$i
 	done
 fi
 
@@ -875,6 +885,7 @@ chmod a+x $OBJ/ssh_proxy.sh
 
 start_sshd ()
 {
+	PIDFILE=$OBJ/pidfile
 	# start sshd
 	logfile="${TEST_SSH_LOGDIR}/sshd.`$OBJ/timestamp`.$$.log"
 	$SUDO ${SSHD} -f $OBJ/sshd_config "$@" -t || fatal "sshd_config broken"
@@ -887,6 +898,7 @@ start_sshd ()
 		i=`expr $i + 1`
 		sleep $i
 	done
+	ln -f -s ${logfile} $TEST_SSHD_LOGFILE
 
 	test -f $PIDFILE || fatal "no sshd running on port $PORT"
 }

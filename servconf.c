@@ -1,4 +1,4 @@
-/* $OpenBSD: servconf.c,v 1.407 2024/05/17 01:17:40 djm Exp $ */
+/* $OpenBSD: servconf.c,v 1.411 2024/06/12 22:36:00 djm Exp $ */
 /*
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
  *                    All rights reserved
@@ -69,6 +69,10 @@
 #include "myproposal.h"
 #include "digest.h"
 
+#if !defined(SSHD_PAM_SERVICE)
+# define SSHD_PAM_SERVICE		"sshd"
+#endif
+
 static void add_listen_addr(ServerOptions *, const char *,
     const char *, int);
 static void add_one_listen_addr(ServerOptions *, const char *,
@@ -88,6 +92,7 @@ initialize_server_options(ServerOptions *options)
 
 	/* Portable-specific options */
 	options->use_pam = -1;
+	options->pam_service_name = NULL;
 
 	/* Standard Options */
 	options->num_ports = 0;
@@ -163,6 +168,18 @@ initialize_server_options(ServerOptions *options)
 	options->per_source_max_startups = -1;
 	options->per_source_masklen_ipv4 = -1;
 	options->per_source_masklen_ipv6 = -1;
+	options->per_source_penalty_exempt = NULL;
+	options->per_source_penalty.enabled = -1;
+	options->per_source_penalty.max_sources4 = -1;
+	options->per_source_penalty.max_sources6 = -1;
+	options->per_source_penalty.overflow_mode = -1;
+	options->per_source_penalty.overflow_mode6 = -1;
+	options->per_source_penalty.penalty_crash = -1;
+	options->per_source_penalty.penalty_authfail = -1;
+	options->per_source_penalty.penalty_noauth = -1;
+	options->per_source_penalty.penalty_grace = -1;
+	options->per_source_penalty.penalty_max = -1;
+	options->per_source_penalty.penalty_min = -1;
 	options->max_authtries = -1;
 	options->max_sessions = -1;
 	options->banner = NULL;
@@ -279,6 +296,8 @@ fill_default_server_options(ServerOptions *options)
 	/* Portable-specific options */
 	if (options->use_pam == -1)
 		options->use_pam = 0;
+	if (options->pam_service_name == NULL)
+		options->pam_service_name = xstrdup(SSHD_PAM_SERVICE);
 
 	/* Standard Options */
 	if (options->num_host_key_files == 0) {
@@ -402,6 +421,28 @@ fill_default_server_options(ServerOptions *options)
 		options->per_source_masklen_ipv4 = 32;
 	if (options->per_source_masklen_ipv6 == -1)
 		options->per_source_masklen_ipv6 = 128;
+	if (options->per_source_penalty.enabled == -1)
+		options->per_source_penalty.enabled = 1;
+	if (options->per_source_penalty.max_sources4 == -1)
+		options->per_source_penalty.max_sources4 = 65536;
+	if (options->per_source_penalty.max_sources6 == -1)
+		options->per_source_penalty.max_sources6 = 65536;
+	if (options->per_source_penalty.overflow_mode == -1)
+		options->per_source_penalty.overflow_mode = PER_SOURCE_PENALTY_OVERFLOW_PERMISSIVE;
+	if (options->per_source_penalty.overflow_mode6 == -1)
+		options->per_source_penalty.overflow_mode6 = options->per_source_penalty.overflow_mode;
+	if (options->per_source_penalty.penalty_crash == -1)
+		options->per_source_penalty.penalty_crash = 90;
+	if (options->per_source_penalty.penalty_grace == -1)
+		options->per_source_penalty.penalty_grace = 20;
+	if (options->per_source_penalty.penalty_authfail == -1)
+		options->per_source_penalty.penalty_authfail = 5;
+	if (options->per_source_penalty.penalty_noauth == -1)
+		options->per_source_penalty.penalty_noauth = 1;
+	if (options->per_source_penalty.penalty_min == -1)
+		options->per_source_penalty.penalty_min = 15;
+	if (options->per_source_penalty.penalty_max == -1)
+		options->per_source_penalty.penalty_max = 600;
 	if (options->max_authtries == -1)
 		options->max_authtries = DEFAULT_AUTH_FAIL_MAX;
 	if (options->max_sessions == -1)
@@ -479,6 +520,7 @@ fill_default_server_options(ServerOptions *options)
 	CLEAR_ON_NONE(options->chroot_directory);
 	CLEAR_ON_NONE(options->routing_domain);
 	CLEAR_ON_NONE(options->host_key_agent);
+	CLEAR_ON_NONE(options->per_source_penalty_exempt);
 
 	for (i = 0; i < options->num_host_key_files; i++)
 		CLEAR_ON_NONE(options->host_key_files[i]);
@@ -495,7 +537,7 @@ fill_default_server_options(ServerOptions *options)
 typedef enum {
 	sBadOption,		/* == unknown option */
 	/* Portable-specific options */
-	sUsePAM,
+	sUsePAM, sPAMServiceName,
 	/* Standard Options */
 	sPort, sHostKeyFile, sLoginGraceTime,
 	sPermitRootLogin, sLogFacility, sLogLevel, sLogVerbose,
@@ -513,6 +555,7 @@ typedef enum {
 	sBanner, sUseDNS, sHostbasedAuthentication,
 	sHostbasedUsesNameFromPacketOnly, sHostbasedAcceptedAlgorithms,
 	sHostKeyAlgorithms, sPerSourceMaxStartups, sPerSourceNetBlockSize,
+	sPerSourcePenalties, sPerSourcePenaltyExemptList,
 	sClientAliveInterval, sClientAliveCountMax, sAuthorizedKeysFile,
 	sGssAuthentication, sGssCleanupCreds, sGssStrictAcceptor,
 	sAcceptEnv, sSetEnv, sPermitTunnel,
@@ -547,8 +590,10 @@ static struct {
 	/* Portable-specific options */
 #ifdef USE_PAM
 	{ "usepam", sUsePAM, SSHCFG_GLOBAL },
+	{ "pamservicename", sPAMServiceName, SSHCFG_ALL },
 #else
 	{ "usepam", sUnsupported, SSHCFG_GLOBAL },
+	{ "pamservicename", sUnsupported, SSHCFG_ALL },
 #endif
 	{ "pamauthenticationviakbdint", sDeprecated, SSHCFG_GLOBAL },
 	/* Standard Options */
@@ -645,6 +690,8 @@ static struct {
 	{ "maxstartups", sMaxStartups, SSHCFG_GLOBAL },
 	{ "persourcemaxstartups", sPerSourceMaxStartups, SSHCFG_GLOBAL },
 	{ "persourcenetblocksize", sPerSourceNetBlockSize, SSHCFG_GLOBAL },
+	{ "persourcepenalties", sPerSourcePenalties, SSHCFG_GLOBAL },
+	{ "persourcepenaltyexemptlist", sPerSourcePenaltyExemptList, SSHCFG_GLOBAL },
 	{ "maxauthtries", sMaxAuthTries, SSHCFG_ALL },
 	{ "maxsessions", sMaxSessions, SSHCFG_ALL },
 	{ "banner", sBanner, SSHCFG_ALL },
@@ -1280,6 +1327,16 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 	case sUsePAM:
 		intptr = &options->use_pam;
 		goto parse_flag;
+	case sPAMServiceName:
+		charptr = &options->pam_service_name;
+		arg = argv_next(&ac, &av);
+		if (!arg || *arg == '\0') {
+			fatal("%s line %d: missing argument.",
+			    filename, linenum);
+		}
+		if (*activep && *charptr == NULL)
+			*charptr = xstrdup(arg);
+		break;
 
 	/* Standard Options */
 	case sBadOption:
@@ -1943,6 +2000,100 @@ process_server_config_line_depth(ServerOptions *options, char *line,
 		}
 		if (*activep && options->per_source_max_startups == -1)
 			options->per_source_max_startups = value;
+		break;
+
+	case sPerSourcePenaltyExemptList:
+		charptr = &options->per_source_penalty_exempt;
+		arg = argv_next(&ac, &av);
+		if (!arg || *arg == '\0')
+			fatal("%s line %d: missing argument.",
+			    filename, linenum);
+		if (addr_match_list(NULL, arg) != 0) {
+			fatal("%s line %d: keyword %s "
+			    "invalid address argument.",
+			    filename, linenum, keyword);
+		}
+		if (*activep && *charptr == NULL)
+			*charptr = xstrdup(arg);
+		break;
+
+	case sPerSourcePenalties:
+		while ((arg = argv_next(&ac, &av)) != NULL) {
+			found = 1;
+			value = -1;
+			value2 = 0;
+			p = NULL;
+			/* Allow no/yes only in first position */
+			if (strcasecmp(arg, "no") == 0 ||
+			    (value2 = (strcasecmp(arg, "yes") == 0))) {
+				if (ac > 0) {
+					fatal("%s line %d: keyword %s \"%s\" "
+					    "argument must appear alone.",
+					    filename, linenum, keyword, arg);
+				}
+				if (*activep &&
+				    options->per_source_penalty.enabled == -1)
+					options->per_source_penalty.enabled = value2;
+				continue;
+			} else if (strncmp(arg, "crash:", 6) == 0) {
+				p = arg + 6;
+				intptr = &options->per_source_penalty.penalty_crash;
+			} else if (strncmp(arg, "authfail:", 9) == 0) {
+				p = arg + 9;
+				intptr = &options->per_source_penalty.penalty_authfail;
+			} else if (strncmp(arg, "noauth:", 7) == 0) {
+				p = arg + 7;
+				intptr = &options->per_source_penalty.penalty_noauth;
+			} else if (strncmp(arg, "grace-exceeded:", 15) == 0) {
+				p = arg + 15;
+				intptr = &options->per_source_penalty.penalty_grace;
+			} else if (strncmp(arg, "max:", 4) == 0) {
+				p = arg + 4;
+				intptr = &options->per_source_penalty.penalty_max;
+			} else if (strncmp(arg, "min:", 4) == 0) {
+				p = arg + 4;
+				intptr = &options->per_source_penalty.penalty_min;
+			} else if (strncmp(arg, "max-sources4:", 13) == 0) {
+				intptr = &options->per_source_penalty.max_sources4;
+				if ((errstr = atoi_err(arg+13, &value)) != NULL)
+					fatal("%s line %d: %s value %s.",
+					    filename, linenum, keyword, errstr);
+			} else if (strncmp(arg, "max-sources6:", 13) == 0) {
+				intptr = &options->per_source_penalty.max_sources6;
+				if ((errstr = atoi_err(arg+13, &value)) != NULL)
+					fatal("%s line %d: %s value %s.",
+					    filename, linenum, keyword, errstr);
+			} else if (strcmp(arg, "overflow:deny-all") == 0) {
+				intptr = &options->per_source_penalty.overflow_mode;
+				value = PER_SOURCE_PENALTY_OVERFLOW_DENY_ALL;
+			} else if (strcmp(arg, "overflow:permissive") == 0) {
+				intptr = &options->per_source_penalty.overflow_mode;
+				value = PER_SOURCE_PENALTY_OVERFLOW_PERMISSIVE;
+			} else if (strcmp(arg, "overflow6:deny-all") == 0) {
+				intptr = &options->per_source_penalty.overflow_mode6;
+				value = PER_SOURCE_PENALTY_OVERFLOW_DENY_ALL;
+			} else if (strcmp(arg, "overflow6:permissive") == 0) {
+				intptr = &options->per_source_penalty.overflow_mode6;
+				value = PER_SOURCE_PENALTY_OVERFLOW_PERMISSIVE;
+			} else {
+				fatal("%s line %d: unsupported %s keyword %s",
+				    filename, linenum, keyword, arg);
+			}
+			/* If no value was parsed above, assume it's a time */
+			if (value == -1 && (value = convtime(p)) == -1) {
+				fatal("%s line %d: invalid %s time value.",
+				    filename, linenum, keyword);
+			}
+			if (*activep && *intptr == -1) {
+				*intptr = value;
+				/* any option implicitly enables penalties */
+				options->per_source_penalty.enabled = 1;
+			}
+		}
+		if (!found) {
+			fatal("%s line %d: no %s specified",
+			    filename, linenum, keyword);
+		}
 		break;
 
 	case sMaxAuthTries:
@@ -2996,6 +3147,7 @@ dump_config(ServerOptions *o)
 	/* integer arguments */
 #ifdef USE_PAM
 	dump_cfg_fmtint(sUsePAM, o->use_pam);
+	dump_cfg_string(sPAMServiceName, o->pam_service_name);
 #endif
 	dump_cfg_int(sLoginGraceTime, o->login_grace_time);
 	dump_cfg_int(sX11DisplayOffset, o->x11_display_offset);
@@ -3082,6 +3234,7 @@ dump_config(ServerOptions *o)
 	dump_cfg_string(sRDomain, o->routing_domain);
 #endif
 	dump_cfg_string(sSshdSessionPath, o->sshd_session_path);
+	dump_cfg_string(sPerSourcePenaltyExemptList, o->per_source_penalty_exempt);
 
 	/* string arguments requiring a lookup */
 	dump_cfg_string(sLogLevel, log_level_name(o->log_level));
@@ -3169,4 +3322,25 @@ dump_config(ServerOptions *o)
 	if (o->pubkey_auth_options & PUBKEYAUTH_VERIFY_REQUIRED)
 		printf(" verify-required");
 	printf("\n");
+
+	if (o->per_source_penalty.enabled) {
+		printf("persourcepenalties crash:%d authfail:%d noauth:%d "
+		    "grace-exceeded:%d max:%d min:%d max-sources4:%d "
+		    "max-sources6:%d overflow:%s overflow6:%s\n",
+		    o->per_source_penalty.penalty_crash,
+		    o->per_source_penalty.penalty_authfail,
+		    o->per_source_penalty.penalty_noauth,
+		    o->per_source_penalty.penalty_grace,
+		    o->per_source_penalty.penalty_max,
+		    o->per_source_penalty.penalty_min,
+		    o->per_source_penalty.max_sources4,
+		    o->per_source_penalty.max_sources6,
+		    o->per_source_penalty.overflow_mode ==
+		    PER_SOURCE_PENALTY_OVERFLOW_DENY_ALL ?
+		    "deny-all" : "permissive",
+		    o->per_source_penalty.overflow_mode6 ==
+		    PER_SOURCE_PENALTY_OVERFLOW_DENY_ALL ?
+		    "deny-all" : "permissive");
+	} else
+		printf("persourcepenalties no\n");
 }
